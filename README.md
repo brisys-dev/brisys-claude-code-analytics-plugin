@@ -1,0 +1,1 @@
+# brisys-claude-code-analytics-plugin
