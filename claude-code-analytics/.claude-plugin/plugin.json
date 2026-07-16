@@ -1,0 +1,5 @@
+{
+  "name": "claude-code-analytics",
+  "version": "0.6.0",
+  "description": "Claude / Claude Code の利用統計を収集するプラグイン"
+}

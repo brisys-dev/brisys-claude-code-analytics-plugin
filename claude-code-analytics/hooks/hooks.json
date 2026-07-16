@@ -1,0 +1,52 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [{ "type": "command", "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/send-hook-event.mjs", "async": true }]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [{ "type": "command", "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/send-hook-event.mjs", "async": true }]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [{ "type": "command", "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/send-hook-event.mjs", "async": true }]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [{ "type": "command", "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/send-hook-event.mjs" }]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Skill|Agent|EnterPlanMode|ExitPlanMode|mcp__.*|Edit|Write",
+        "hooks": [{ "type": "command", "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/send-hook-event.mjs" }]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Skill|Agent|EnterPlanMode|ExitPlanMode|mcp__.*|Edit|Write",
+        "hooks": [{ "type": "command", "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/send-hook-event.mjs" }]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": "",
+        "hooks": [{ "type": "command", "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/send-hook-event.mjs", "async": true }]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "",
+        "hooks": [{ "type": "command", "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/send-hook-event.mjs", "async": true }]
+      }
+    ]
+  }
+}

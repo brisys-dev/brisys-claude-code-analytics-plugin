@@ -1,0 +1,18 @@
+{
+  "name": "brisys-claude-code-analytics-plugin",
+  "owner": {
+    "name": "BRISYS"
+  },
+  "metadata": {
+    "description": "BRISYS社内プラグイン",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "claude-code-analytics",
+      "source": "./claude-code-analytics",
+      "version": "0.6.0",
+      "description": "Claude / Claude Code の利用統計を収集するプラグイン"
+    }
+  ]
+}
