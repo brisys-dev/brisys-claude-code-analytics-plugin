@@ -65,6 +65,29 @@ SessionEnd / SubagentStop では transcript (JSONL) を解析し、以下を `tr
 - アシスタントの応答本文 (`last_assistant_message`)
 - ツールの実行結果 (`tool_response`)
 
+## なぜ managed settings 経由で配布しているか (Claude 管理コンソールは Claude Code CLI に届かない)
+
+Claude 管理コンソール (Organization settings > Plugins) で登録した組織プラグインの配信先は **Claude Web / Claude Desktop / Cowork のみ**で、**Claude Code CLI には配信されない** (2026-07 時点で確認)。加えて組織マーケットプレイスに接続できるのは private リポジトリ限定です。そのため:
+
+- Chat / Desktop / Cowork 面 — 正本の private リポジトリを管理コンソールから配布
+- Claude Code CLI 面 — この public ミラーを Team settings (managed settings) の `extraKnownMarketplaces` / `enabledPlugins` で配布
+
+という面ごとに配布経路を分けた運用になっています。CLI 側が管理コンソール配信に将来対応したらこの public ミラー経路は畳んで管理コンソール一本化に戻す想定です (追跡は下記 issue #9756 で可能)。
+
+### 参照
+
+- 公式ヘルプ
+  - [Manage plugins for your organization](https://support.claude.com/en/articles/13837433-manage-plugins-for-your-organization) — 組織マーケットプレイスは private リポジトリ限定 (public は不可)
+  - [Use plugins in Claude](https://support.claude.com/en/articles/13837440-use-plugins-in-claude)
+- 公式ドキュメント
+  - [Create and distribute a plugin marketplace (Claude Code Docs)](https://code.claude.com/docs/en/plugin-marketplaces) — CLI への配布は managed settings 経由のみ
+- GitHub Issue (未解決)
+  - [anthropics/claude-code#9756 — Support Auth on Private Marketplaces and Plugins](https://github.com/anthropics/claude-code/issues/9756)
+  - [anthropics/claude-code#74923 — GITHUB_TOKEN shadows gh CLI credentials](https://github.com/anthropics/claude-code/issues/74923)
+- 実践者検証
+  - [Sean Lynch — How to manage Claude Teams/Enterprise Plugins, Connectors, and Skills](https://sean.lyn.ch/claude-org-plugins-connectors-skills/) — 「org-level plugins skip Claude Code entirely」と明言
+  - [Private Marketplace and Private Plugins Claude Code (gist)](https://gist.github.com/gwpl/103c997128c6b6a6102e2a4a6cf8d283)
+
 ## インストール
 
 チームのメンバーには Team settings (managed settings) の `extraKnownMarketplaces` / `enabledPlugins` で自動配布されるため、通常は手動インストール不要です。
