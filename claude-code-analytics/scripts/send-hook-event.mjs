@@ -11,7 +11,14 @@ import { execFileSync } from "node:child_process";
 import http from "node:http";
 import https from "node:https";
 
-const COLLECTOR_VERSION = "0.1.0";
+// 0.3.0: SessionStart / transcript batch trigger 用に責務を縮小。
+//   http hook 対応の 8 event (SessionEnd / UserPromptSubmit / PostToolUse /
+//   PostToolUseFailure / SubagentStart / SubagentStop / Stop / StopFailure)
+//   は type:"http" として managed settings 経由で送信されるため、Node.js に
+//   依存しない。本 script は http 非対応の SessionStart と、transcript batch
+//   (SessionEnd / SubagentStop の `--transcript-only`) のみを担う。
+// 0.2.0: http hook 併用 (`--transcript-only` フラグを追加)。
+const COLLECTOR_VERSION = "0.3.0";
 const PARSER_VERSION = COLLECTOR_VERSION;
 
 const EVENT_TYPE_MAP = {
@@ -664,6 +671,13 @@ function postJson(apiUrl, apiKey, endpoint, body) {
 // --- エントリーポイント ---
 
 async function main() {
+  // `--transcript-only` は SessionEnd / SubagentStop で transcript batch のみ
+  // 送信するモード。hook event 本体は managed settings 側の type:"http"
+  // hook が /api/v1/hook-events に直接送るため、collector は transcript batch
+  // (transcript.token_usage / command_detected / skill_detected) のみを
+  // /api/v1/transcript-events に送る責務を担う。
+  const isTranscriptOnly = process.argv.includes("--transcript-only");
+
   // DEV用の環境変数が設定されていれば優先する（remote-settings.json の値を上書きできる）
   const apiUrl = process.env.AI_ANALYTICS_DEV_API_URL || process.env.AI_ANALYTICS_API_URL || "";
   const apiKey = process.env.AI_ANALYTICS_DEV_API_KEY || process.env.AI_ANALYTICS_API_KEY || "";
@@ -706,14 +720,18 @@ async function main() {
     join(process.env.TMPDIR || process.env.TEMP || "/tmp", "ai-analytics-hook-state");
 
   // PreToolUse はスナップショットを取って終了
+  // (行数統計は http hook に移行できないため、当面 collector で残す。
+  //  将来 #19 の OTEL `claude_code.lines_of_code.count` へ移行する)
   if (hookEventName === "PreToolUse") {
     capturePreToolSnapshot(toolName, sessionId, toolUseId, toolFilePath, stateDir);
     process.exit(0);
   }
 
-  // PostToolUse / PostToolUseFailure の行数統計
+  // PostToolUse / PostToolUseFailure は http hook で受けるため、
+  // 行数統計付きの event 送信はここでは行わない。
+  // (Phase 2 で PreToolUse も廃止する予定 — snapshot 側だけ生き残る現状は暫定)
   let toolLineStats = null;
-  if (hookEventName === "PostToolUse" || hookEventName === "PostToolUseFailure") {
+  if (!isTranscriptOnly && (hookEventName === "PostToolUse" || hookEventName === "PostToolUseFailure")) {
     toolLineStats = buildToolLineStats(toolName, sessionId, toolUseId, toolFilePath, stateDir);
   }
 
@@ -754,10 +772,16 @@ async function main() {
     );
   }
 
-  await Promise.all([
-    postJson(apiUrl, apiKey, "/api/v1/events", eventJson),
-    postJson(apiUrl, apiKey, "/api/v1/transcript-events", transcriptBatchJson),
-  ]);
+  // http hook で受ける event は collector からは event 送信しない。
+  // hooks.json 側で `--transcript-only` を付与された呼び出しがこれに該当する。
+  const requests = [];
+  if (!isTranscriptOnly) {
+    requests.push(postJson(apiUrl, apiKey, "/api/v1/events", eventJson));
+  }
+  if (transcriptBatchJson) {
+    requests.push(postJson(apiUrl, apiKey, "/api/v1/transcript-events", transcriptBatchJson));
+  }
+  await Promise.all(requests);
 }
 
 // 直接実行時のみ main() を起動（テストからの import 時はスキップ）
