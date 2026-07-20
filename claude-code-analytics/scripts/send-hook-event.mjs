@@ -5,25 +5,47 @@
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import http from "node:http";
 import https from "node:https";
 
-// 0.4.0: event 送信 body に top-level フィールド `git_remote_url` を追加.
-//   Node.js 有り端末では cwd から `git config --get remote.origin.url` を試み、
-//   失敗時は `.git/config` 直読の 2 段フォールバックで解決する.
-//   `AI_ANALYTICS_DISABLE_GIT_REMOTE=1` で opt-out.
-//   canonical な project 識別子 (owner/repo) は下流 (dbt) の normalize 処理で導出.
-// 0.3.0: SessionStart / transcript batch trigger 用に責務を縮小.
-//   http hook 対応の 8 event (SessionEnd / UserPromptSubmit / PostToolUse /
-//   PostToolUseFailure / SubagentStart / SubagentStop / Stop / StopFailure)
-//   は type:"http" として managed settings 経由で送信されるため、Node.js に
-//   依存しない。本 script は http 非対応の SessionStart と、transcript batch
-//   (SessionEnd / SubagentStop の `--transcript-only`) のみを担う。
-// 0.2.0: http hook 併用 (`--transcript-only` フラグを追加).
-const COLLECTOR_VERSION = "0.4.0";
+// changelog (履歴: hard-coded 定数管理時代)
+//   0.4.0: event 送信 body に top-level フィールド `git_remote_url` を追加.
+//     Node.js 有り端末では cwd から `git config --get remote.origin.url` を試み、
+//     失敗時は `.git/config` 直読の 2 段フォールバックで解決する.
+//     `AI_ANALYTICS_DISABLE_GIT_REMOTE=1` で opt-out.
+//     canonical な project 識別子 (owner/repo) は下流 (dbt) の normalize 処理で導出.
+//   0.3.0: SessionStart / transcript batch trigger 用に責務を縮小.
+//     http hook 対応の 8 event (SessionEnd / UserPromptSubmit / PostToolUse /
+//     PostToolUseFailure / SubagentStart / SubagentStop / Stop / StopFailure)
+//     は type:"http" として managed settings 経由で送信されるため、Node.js に
+//     依存しない。本 script は http 非対応の SessionStart と、transcript batch
+//     (SessionEnd / SubagentStop の `--transcript-only`) のみを担う。
+//   0.2.0: http hook 併用 (`--transcript-only` フラグを追加).
+//
+// Issue #7: plugin package の calver (`.claude-plugin/plugin.json` の `version`) を
+// 実行時に読み取り、hook 送信 body の collector_version に採用する.
+// - hard-coded 定数の manual sync 忘れによる rollout 追跡精度低下を防ぐ.
+// - dashboard 側は raw の collector_version から「plugin package 分布」を直接算出できる.
+// - plugin.json の read 失敗時は "unknown" にフォールバックし、hook 送信は止めない (fail-open).
+const _pluginJsonPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  ".claude-plugin",
+  "plugin.json",
+);
+const COLLECTOR_VERSION = (() => {
+  try {
+    const parsed = JSON.parse(readFileSync(_pluginJsonPath, "utf8"));
+    return typeof parsed?.version === "string" && parsed.version.length > 0
+      ? parsed.version
+      : "unknown";
+  } catch {
+    return "unknown";
+  }
+})();
 const PARSER_VERSION = COLLECTOR_VERSION;
 
 // git_remote_url payload 最大長 (API 側 Zod schema と一致させる).
