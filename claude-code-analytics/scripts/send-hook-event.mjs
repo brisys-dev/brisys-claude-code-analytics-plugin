@@ -11,15 +11,25 @@ import { execFileSync } from "node:child_process";
 import http from "node:http";
 import https from "node:https";
 
-// 0.3.0: SessionStart / transcript batch trigger 用に責務を縮小。
+// 0.4.0: event 送信 body に top-level フィールド `git_remote_url` を追加.
+//   Node.js 有り端末では cwd から `git config --get remote.origin.url` を試み、
+//   失敗時は `.git/config` 直読の 2 段フォールバックで解決する.
+//   `AI_ANALYTICS_DISABLE_GIT_REMOTE=1` で opt-out.
+//   canonical な project 識別子 (owner/repo) は下流 (dbt) の normalize 処理で導出.
+// 0.3.0: SessionStart / transcript batch trigger 用に責務を縮小.
 //   http hook 対応の 8 event (SessionEnd / UserPromptSubmit / PostToolUse /
 //   PostToolUseFailure / SubagentStart / SubagentStop / Stop / StopFailure)
 //   は type:"http" として managed settings 経由で送信されるため、Node.js に
 //   依存しない。本 script は http 非対応の SessionStart と、transcript batch
 //   (SessionEnd / SubagentStop の `--transcript-only`) のみを担う。
-// 0.2.0: http hook 併用 (`--transcript-only` フラグを追加)。
-const COLLECTOR_VERSION = "0.3.0";
+// 0.2.0: http hook 併用 (`--transcript-only` フラグを追加).
+const COLLECTOR_VERSION = "0.4.0";
 const PARSER_VERSION = COLLECTOR_VERSION;
+
+// git_remote_url payload 最大長 (API 側 Zod schema と一致させる).
+const GIT_REMOTE_URL_MAX_LENGTH = 512;
+// git_remote_url 許容文字 (API 側 Zod schema と一致させる, 制御文字禁止).
+const GIT_REMOTE_URL_ALLOWED_PATTERN = /^[A-Za-z0-9@:/._+-]+$/;
 
 const EVENT_TYPE_MAP = {
   SessionStart: "session.started",
@@ -148,6 +158,168 @@ function resolveProject(rawCwd) {
   }
 
   return rawCwd || "";
+}
+
+// cwd から `git config --get remote.origin.url` を取得する.
+// 2 段フォールバック:
+//   1. `git` バイナリが使える環境では execFileSync で取得 (最も信頼できる source of truth)
+//   2. `git` が失敗 / 存在しない場合は `.git/config` を直読して origin url を抽出
+//      (`.git` が gitfile の worktree / submodule では `gitdir:` を辿る)
+// opt-out: AI_ANALYTICS_DISABLE_GIT_REMOTE=1 で常に null を返す.
+// テスト用の runOverride は `git` execFile の代替関数を差し込むためのオプション引数.
+function resolveGitRemoteUrl(rawCwd, runOverride) {
+  if (process.env.AI_ANALYTICS_DISABLE_GIT_REMOTE === "1") {
+    return null;
+  }
+
+  if (!rawCwd) return null;
+
+  const runner = typeof runOverride === "function"
+    ? runOverride
+    : (args) => execFileSync("git", args, {
+        encoding: "utf8",
+        timeout: 5000,
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+
+  // Step 1: `git config --get remote.origin.url` を試行
+  try {
+    const url = runner(["-C", rawCwd, "config", "--get", "remote.origin.url"]).trim();
+    if (url) {
+      return sanitizeGitRemoteUrl(url);
+    }
+  } catch {
+    // git が使えない / 未初期化 の場合は Step 2 の .git/config フォールバックへ
+  }
+
+  // Step 2: .git/config 直読フォールバック
+  try {
+    const gitDir = resolveGitDir(rawCwd);
+    if (gitDir) {
+      const configPath = join(gitDir, "config");
+      if (isReadableFile(configPath)) {
+        const configText = readFileSync(configPath, "utf8");
+        const url = extractOriginUrlFromConfig(configText);
+        if (url) {
+          return sanitizeGitRemoteUrl(url);
+        }
+      }
+    }
+  } catch {
+    // config ファイル読み取り失敗はそのまま null
+  }
+
+  return null;
+}
+
+// cwd から `.git` ディレクトリを解決する. `.git` がファイル (gitfile) の場合は
+// `gitdir: <path>` を再帰的に辿る (循環防止のため max 5 hop).
+function resolveGitDir(rawCwd) {
+  let current = rawCwd;
+
+  // .git の場所を上位ディレクトリまで探索
+  for (let hop = 0; hop < 32; hop++) {
+    const dotGit = join(current, ".git");
+
+    let stat;
+    try {
+      stat = statSync(dotGit);
+    } catch {
+      // 上位に遡る
+      const parent = resolve(current, "..");
+      if (parent === current) return null;
+      current = parent;
+      continue;
+    }
+
+    if (stat.isDirectory()) {
+      return dotGit;
+    }
+
+    if (stat.isFile()) {
+      // gitfile: `gitdir: <path>` を辿る (worktree / submodule 対応, max 5 hop で循環防止)
+      let gitfilePath = dotGit;
+      for (let follow = 0; follow < 5; follow++) {
+        let gitdir;
+        try {
+          const content = readFileSync(gitfilePath, "utf8");
+          const match = /^gitdir:\s*(.+)$/m.exec(content);
+          if (!match) return null;
+          gitdir = match[1].trim();
+        } catch {
+          return null;
+        }
+
+        // 相対パスなら gitfile のディレクトリを基準に解決
+        const gitfileDir = gitfilePath.endsWith(".git")
+          ? gitfilePath.slice(0, -".git".length) || "."
+          : resolve(gitfilePath, "..");
+        const resolved = resolve(gitfileDir, gitdir);
+
+        let resolvedStat;
+        try {
+          resolvedStat = statSync(resolved);
+        } catch {
+          return null;
+        }
+
+        if (resolvedStat.isDirectory()) {
+          return resolved;
+        }
+        if (resolvedStat.isFile()) {
+          gitfilePath = resolved;
+          continue;
+        }
+        return null;
+      }
+      return null;
+    }
+
+    return null;
+  }
+
+  return null;
+}
+
+// .git/config テキストから [remote "origin"] セクションの url を抽出する.
+// git-config は行指向で `[section]` の後に `key = value` が続く. 空白と大文字小文字を
+// 許容し、`origin` セクションのみを対象にする.
+function extractOriginUrlFromConfig(configText) {
+  const lines = configText.split(/\r?\n/);
+  let inOrigin = false;
+
+  for (const line of lines) {
+    const sectionMatch = /^\s*\[\s*([A-Za-z0-9._-]+)(?:\s+"([^"]*)")?\s*\]\s*$/.exec(line);
+    if (sectionMatch) {
+      const section = sectionMatch[1].toLowerCase();
+      const subsection = sectionMatch[2] || "";
+      inOrigin = section === "remote" && subsection === "origin";
+      continue;
+    }
+
+    if (!inOrigin) continue;
+
+    const kvMatch = /^\s*([A-Za-z0-9._-]+)\s*=\s*(.*)$/.exec(line);
+    if (!kvMatch) continue;
+
+    if (kvMatch[1].toLowerCase() === "url") {
+      // 末尾コメント (`; comment` / `# comment` 相当) は git-config には無いので単純に trim
+      return kvMatch[2].trim();
+    }
+  }
+
+  return null;
+}
+
+// API 側 schema の制約 (max 512 chars / 許容文字集合) を満たさない値は送信しない.
+// マッチしなければ null を返し、payload には含めない.
+function sanitizeGitRemoteUrl(url) {
+  if (typeof url !== "string") return null;
+  const trimmed = url.trim();
+  if (trimmed.length === 0) return null;
+  if (trimmed.length > GIT_REMOTE_URL_MAX_LENGTH) return null;
+  if (!GIT_REMOTE_URL_ALLOWED_PATTERN.test(trimmed)) return null;
+  return trimmed;
 }
 
 // --- スナップショット管理 (PreToolUse / PostToolUse の差分計算用) ---
@@ -346,7 +518,9 @@ function redactPayload(payload, toolLineStats) {
 
 // --- イベント JSON 構築 ---
 
-function buildEventJson(hookInput, email, hostnameValue, projectValue, eventAt, toolLineStats) {
+// gitRemoteUrl: v0.4.0 で追加した optional な top-level フィールド.
+// null / undefined の場合はリクエスト body に含めない (旧 API 互換のため).
+function buildEventJson(hookInput, email, hostnameValue, projectValue, eventAt, toolLineStats, gitRemoteUrl = null) {
   if (typeof hookInput !== "object" || hookInput === null) return null;
 
   const eventType = EVENT_TYPE_MAP[hookInput.hook_event_name];
@@ -365,7 +539,7 @@ function buildEventJson(hookInput, email, hostnameValue, projectValue, eventAt, 
 
   const redactedPayload = redactPayload(payload, toolLineStats);
 
-  return {
+  const eventJson = {
     event_type: eventType,
     event_at: eventAt,
     session_id: hookInput.session_id,
@@ -375,6 +549,14 @@ function buildEventJson(hookInput, email, hostnameValue, projectValue, eventAt, 
     collector_version: COLLECTOR_VERSION,
     payload: redactedPayload,
   };
+
+  // git_remote_url は取得できた場合のみ含める. 旧 API と互換性を保ちつつ、
+  // 新 API 側では Zod schema の nullable().optional() で受ける.
+  if (typeof gitRemoteUrl === "string" && gitRemoteUrl.length > 0) {
+    eventJson.git_remote_url = gitRemoteUrl;
+  }
+
+  return eventJson;
 }
 
 // --- トークン使用量の抽出 ---
@@ -737,9 +919,10 @@ async function main() {
 
   const rawCwd = extractStringField(hookInput, "cwd");
   const projectValue = resolveProject(rawCwd);
+  const gitRemoteUrl = resolveGitRemoteUrl(rawCwd);
   const eventAt = new Date().toISOString().replace(/\.\d{3}Z$/u, ".000Z");
 
-  const eventJson = buildEventJson(hookInput, email, hostnameValue, projectValue, eventAt, toolLineStats);
+  const eventJson = buildEventJson(hookInput, email, hostnameValue, projectValue, eventAt, toolLineStats, gitRemoteUrl);
   if (!eventJson) {
     process.exit(0);
   }
@@ -804,8 +987,12 @@ export {
   capturePreToolSnapshot,
   computeLineDiff,
   countLinesInText,
+  extractOriginUrlFromConfig,
   extractTokenUsageEvents,
   redactPayload,
   resolveEmail,
   resolveEmailFromClaudeJson,
+  resolveGitDir,
+  resolveGitRemoteUrl,
+  sanitizeGitRemoteUrl,
 };
