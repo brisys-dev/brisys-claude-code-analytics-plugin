@@ -581,88 +581,6 @@ function buildEventJson(hookInput, email, hostnameValue, projectValue, eventAt, 
   return eventJson;
 }
 
-// --- トークン使用量の抽出 ---
-
-// transcript の assistant メッセージから requestId 単位でトークン使用量を集計し、
-// モデルごとに1つの transcript.token_usage イベントを生成する
-function extractTokenUsageEvents(lines) {
-  // requestId → 最後の assistant 行をマッピング（ストリーミング中間行を排除）
-  const lastByRequestId = new Map();
-
-  for (let index = 0; index < lines.length; index++) {
-    const line = lines[index];
-    if (!line || typeof line !== "object") continue;
-    if (line.type !== "assistant") continue;
-    if (!line.message || !line.message.usage) continue;
-
-    const requestId = line.requestId || line.message?.id || `idx-${index}`;
-    lastByRequestId.set(requestId, { line, index });
-  }
-
-  // モデルごとに集計
-  const byModel = new Map();
-  let lastTimestamp = null;
-
-  for (const { line } of lastByRequestId.values()) {
-    const model = line.message.model || "unknown";
-    const usage = line.message.usage;
-
-    if (!byModel.has(model)) {
-      byModel.set(model, {
-        request_count: 0,
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
-        service_tier: null,
-      });
-    }
-
-    const agg = byModel.get(model);
-    agg.request_count += 1;
-    agg.input_tokens += usage.input_tokens || 0;
-    agg.output_tokens += usage.output_tokens || 0;
-    agg.cache_creation_input_tokens += usage.cache_creation_input_tokens || 0;
-    agg.cache_read_input_tokens += usage.cache_read_input_tokens || 0;
-    if (usage.service_tier) {
-      agg.service_tier = usage.service_tier;
-    }
-
-    // セッション中の最後のタイムスタンプを記録
-    if (typeof line.timestamp === "string" && line.timestamp.length > 0) {
-      if (!lastTimestamp || line.timestamp > lastTimestamp) {
-        lastTimestamp = line.timestamp;
-      }
-    }
-  }
-
-  const eventAt = lastTimestamp || new Date().toISOString().replace(/\.\d{3}Z$/u, ".000Z");
-  const events = [];
-
-  for (const [model, agg] of byModel) {
-    events.push({
-      event_type: "transcript.token_usage",
-      event_at: eventAt,
-      transcript_line_number: null,
-      transcript_line_uuid: null,
-      content_index: null,
-      source_record_type: "assistant",
-      source_record_subtype: null,
-      payload: {
-        model,
-        request_count: agg.request_count,
-        input_tokens: agg.input_tokens,
-        output_tokens: agg.output_tokens,
-        cache_creation_input_tokens: agg.cache_creation_input_tokens,
-        cache_read_input_tokens: agg.cache_read_input_tokens,
-        service_tier: agg.service_tier,
-      },
-    });
-  }
-
-  return events;
-}
-
 // --- Transcript 解析 ---
 
 function extractTag(text, tagName) {
@@ -802,10 +720,6 @@ function buildTranscriptBatchJson(transcriptPath, includeCommands, eventJson, em
     }
   }
 
-  // token_usage イベントの抽出（モデル別セッション集計）
-  const tokenEvents = extractTokenUsageEvents(lines);
-  events.push(...tokenEvents);
-
   if (events.length === 0) return null;
 
   return {
@@ -878,8 +792,8 @@ async function main() {
   // `--transcript-only` は SessionEnd / SubagentStop で transcript batch のみ
   // 送信するモード。hook event 本体は managed settings 側の type:"http"
   // hook が /api/v1/hook-events に直接送るため、collector は transcript batch
-  // (transcript.token_usage / command_detected / skill_detected) のみを
-  // /api/v1/transcript-events に送る責務を担う。
+  // (command_detected / skill_detected) のみを /api/v1/transcript-events に
+  // 送る責務を担う。
   const isTranscriptOnly = process.argv.includes("--transcript-only");
 
   // DEV用の環境変数が設定されていれば優先する（remote-settings.json の値を上書きできる）
@@ -1010,7 +924,6 @@ export {
   computeLineDiff,
   countLinesInText,
   extractOriginUrlFromConfig,
-  extractTokenUsageEvents,
   redactPayload,
   resolveEmail,
   resolveEmailFromClaudeJson,
