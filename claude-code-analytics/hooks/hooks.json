@@ -6,7 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/send-hook-event.mjs",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/send-hook-event.mjs"],
             "async": true
           }
         ]
@@ -18,7 +19,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/send-hook-event.mjs --transcript-only",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/send-hook-event.mjs",
+              "--transcript-only"
+            ],
             "async": true
           }
         ]
@@ -30,7 +35,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/send-hook-event.mjs --transcript-only",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/send-hook-event.mjs",
+              "--transcript-only"
+            ],
             "async": true
           }
         ]
