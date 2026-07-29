@@ -1,0 +1,100 @@
+#!/bin/sh
+# Claude Code の hook から exec form (command + args) で直接起動される収集ランチャー。
+#
+# hooks.json は全 OS 共通で `${CLAUDE_PLUGIN_ROOT}/bin/collector` の **1 エントリだけ**を指す。
+# OS ごとにエントリを並べる必要は無い。Windows では拡張子の無いファイルが実行候補に
+# ならず、PATHEXT の補完で**隣の collector.exe が選ばれる**ため。
+# (Windows ランナーで実測: 中身が sh スクリプトの拡張子なしファイルを spawn すると
+#  stderr 空・exit 0 で collector.exe が起動する。Node と Bun の両方で同じ挙動。
+#  拡張子なしのファイル自体は実行候補にならないので、sh が cmd に食われることもない)
+#
+# したがってこのスクリプトは **Unix 系だけを相手にすればよく、Batch とのポリグロットに
+# する必要が無い**。以前は Batch + sh のポリグロットにしていたが、そのために
+#   - Debian 系の /bin/sh = dash が `function name() {}` を解釈できず Linux の収集が停止
+#   - PowerShell が heredoc 終端以降も構文解析して Windows 側が丸ごとパースエラー
+# という事故を 2 度起こしている。ポリグロットを捨てたのでこの種の事故は構造的に起きない。
+#
+# **サブシェルを起こさないことを優先して書いてある。** 収集は hook から毎回起動されるので、
+# ここでのプロセス起動がそのまま応答時間に乗る。実測 (macOS、中央値):
+#   dirname + cd&&pwd + uname -s = 26.5ms / 組み込みだけで判定 = 18.4ms (-8.1ms)
+# 残る 7.5ms は sh 自身の起動コストで、1 エントリ方式では削れない。
+#
+# **POSIX の範囲だけで書く** — Debian 系の /bin/sh は dash なので、
+# `function name() {}` や `[[ ]]`、配列は使えない。検査は `shellcheck -s dash`。
+set -eu
+
+# $0 は hooks.json 経由なら絶対パスなので、パラメータ展開だけでディレクトリが取れる。
+# `dirname` の fork と `cd && pwd` のサブシェルを避けるためにこう書いている。
+#
+# **区切りは / と \ の両方を見る。** Windows の Git Bash へ `D:\...\bin\collector` の形で
+# 渡されることがあり、`${0%/*}` だけだと区切りが見つからず $0 のまま残ってしまう
+# (以前 `dirname` を使っていたときは MSYS2 の dirname が Windows パスを解釈してくれて
+#  いたので露見しなかった。CI の git bash ケースがこれを検出した)。
+dir=${0%/*}
+case $dir in
+  "$0") dir=${0%\\*} ;;
+esac
+case $dir in
+  # 絶対パス。POSIX の /... と Windows の C:/... / C:\... をそのまま使う
+  /* | ?:[/\\]*) ;;
+  # どちらの区切りも無い = PATH 解決やコマンド名だけで起動された
+  "$0") dir=. ;;
+  # 相対パス。手元検証で `sh bin/collector` のように叩かれたときだけここを通る
+  *) dir=$(CDPATH='' cd -- "$dir" && pwd) ;;
+esac
+
+# OS 判定も組み込みで済ませて `uname` の fork を避ける。
+# macOS には必ず /System/Library/CoreServices があり、Linux / WSL には無い。
+if [ -d /System/Library/CoreServices ]; then
+  # arm64 + x86_64 の universal binary なのでアーキ判定は不要
+  exec "$dir/collector-macos" "$@"
+fi
+
+# Linux / WSL / Git Bash は /proc/version を持つ。read は組み込みなので fork しない。
+# WSL では中身に microsoft / WSL が入るが、Linux バイナリで正しいのでそのまま通す。
+if [ -r /proc/version ]; then
+  read -r _proc_version < /proc/version
+  case $_proc_version in
+    # Windows の Git Bash / MSYS2 / Cygwin は /proc をエミュレートするので除外する。
+    # exec form の spawn では PATHEXT 補完で .exe が直接選ばれるためここには来ないが、
+    # 手元検証で `sh bin/collector` のように明示的に叩いたときの保険。
+    *MINGW* | *MSYS* | *CYGWIN*) exec "$dir/collector.exe" "$@" ;;
+  esac
+  # ネイティブ Linux (Ubuntu 等) と WSL1 / WSL2。musl 静的リンクなので
+  # ディストロも glibc のバージョンも問わない。
+  # hooks.json のエントリが 1 つしか無いので、WSL の binfmt (WSLInterop) 経由で
+  # collector.exe が二重に起動して同じイベントを 2 回送る事故も起きない。
+  case "$(uname -m 2>/dev/null || echo unknown)" in
+    x86_64 | amd64)
+      exec "$dir/collector-linux-x64" "$@"
+      ;;
+    *)
+      # ARM Linux 等は未配布。必要になったら collector 側の release workflow へ
+      # aarch64-unknown-linux-musl を足す
+      exit 0
+      ;;
+  esac
+fi
+
+# ここから下は上の 2 つの判定がどちらも当たらなかった環境向けのフォールバック。
+# /proc が無い Linux (極小コンテナ等) や、/System/Library を持たない macOS 派生を
+# 取りこぼさないために uname で判定し直す。
+case "$(uname -s 2>/dev/null || echo unknown)" in
+  Darwin)
+    exec "$dir/collector-macos" "$@"
+    ;;
+  Linux)
+    case "$(uname -m 2>/dev/null || echo unknown)" in
+      x86_64 | amd64) exec "$dir/collector-linux-x64" "$@" ;;
+      *) exit 0 ;;
+    esac
+    ;;
+  MINGW* | MSYS* | CYGWIN*)
+    exec "$dir/collector.exe" "$@"
+    ;;
+  *)
+    # 収集は fire-and-forget なので、対応バイナリが無い環境では存在しないファイルを
+    # exec して謎のエラーを出すのではなく、明示的に何もせず 0 で終わる
+    exit 0
+    ;;
+esac

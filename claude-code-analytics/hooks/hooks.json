@@ -1,4 +1,23 @@
 {
+  "_comment": [
+    "収集本体は bin/ の単一バイナリ。起動は bin/collector に集約し、hooks.json は",
+    "**全 OS 共通で 1 エントリ**だけを持つ。OS ごとにエントリを並べる必要は無い:",
+    "  Unix 系 -> bin/collector (shebang で /bin/sh。uname で macOS / Linux を判定)",
+    "  Windows -> 拡張子なしファイルは実行候補にならず、PATHEXT 補完で bin/collector.exe",
+    "Windows ランナーで実測済み (Node / Bun 両方) — 中身が sh の拡張子なしファイルを",
+    "spawn すると stderr 空・exit 0 で .exe が起動する。",
+    "",
+    "**args を必ず書く**。args があると exec form (シェルを介さず直接 spawn) になり、",
+    "無いと shell form (sh -c / Git Bash / PowerShell) になる。shell form では",
+    "${CLAUDE_PLUGIN_ROOT} が引用符なしで展開されるため、パスに空白があると分割されて",
+    "無言で落ちる。引数が無いイベントでも args を [] と明記する (実測で exec form になる)。",
+    "",
+    "経路は 4 つ:",
+    "  macOS                -> bin/collector-macos (arm64 + x86_64 universal)",
+    "  Linux / WSL (x86_64) -> bin/collector-linux-x64 (musl 静的リンク)",
+    "  Windows              -> bin/collector.exe (PATHEXT 補完)",
+    "  上記以外 (ARM Linux 等) は何もせず 0 で終わる"
+  ],
   "hooks": {
     "SessionStart": [
       {
@@ -6,8 +25,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/send-hook-event.mjs"],
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/collector",
+            "args": [],
             "async": true
           }
         ]
@@ -19,9 +38,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/collector",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/scripts/send-hook-event.mjs",
               "--transcript-only"
             ],
             "async": true
@@ -35,9 +53,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/collector",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/scripts/send-hook-event.mjs",
               "--transcript-only"
             ],
             "async": true
