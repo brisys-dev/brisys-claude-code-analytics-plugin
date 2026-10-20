@@ -17,7 +17,7 @@
     {
       "name": "brisys-claude-code-analytics",
       "source": "./brisys-claude-code-analytics",
-      "version": "2026.10.101",
+      "version": "2026.10.102",
       "description": "Claude Code の利用統計を mod で収集するプラグイン (Node.js もバイナリも不要)"
     }
   ]
