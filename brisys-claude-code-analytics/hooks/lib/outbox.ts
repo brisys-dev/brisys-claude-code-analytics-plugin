@@ -4,8 +4,10 @@
 //
 // 本文は保存後に書き換えない。再送の回数と次の時刻だけを更新する。同じものを 2 つの
 // セッションが送っても、API の event_id が同じなので staging で 1 件になる。
+//
+// `$.store` を読み書きする処理は register.ts にある。ここにはキーと形式の定義だけを置く。
 
-import type { Dollar, JsonObject } from './types'
+import type { JsonObject } from './types'
 
 export const OUTBOX_PREFIX = 'outbox/v1/'
 export const QUARANTINE_PREFIX = 'quarantine/v1/'
@@ -55,14 +57,6 @@ export function recordKey(record: OutboxRecord): string {
   return `${OUTBOX_PREFIX}${record.sessionId}/${String(event_type)}:${String(transcript_line_uuid)}:${String(content_index ?? 0)}`
 }
 
-/** まだ無ければ保存する (同じキーの本文を書き換えない)。保存したら true。 */
-export async function persistRecord($: Dollar, record: OutboxRecord): Promise<boolean> {
-  const key = recordKey(record)
-  if ((await $.store.get(key)) !== undefined) return false
-  await $.store.set(key, record)
-  return true
-}
-
 /**
  * 次に送るまでの待ち時間。retry は 30 秒から倍々で最大 1 時間、hold (401/403) は 1 時間。
  * 同時に失敗した端末が一斉に再送しないよう、±20% の揺らぎを入れる。
@@ -70,16 +64,4 @@ export async function persistRecord($: Dollar, record: OutboxRecord): Promise<bo
 export function backoffMs(attempts: number, disposition: 'retry' | 'hold', random: number): number {
   const base = disposition === 'hold' ? 60 * 60_000 : Math.min(30_000 * 2 ** Math.max(0, attempts - 1), 60 * 60_000)
   return Math.round(base * (0.8 + 0.4 * random))
-}
-
-export async function readStats($: Dollar): Promise<Stats> {
-  const value = (await $.store.get(STATS_KEY)) as Partial<Stats> | undefined
-  return { dropped: Number(value?.dropped ?? 0), quarantined: Number(value?.quarantined ?? 0) }
-}
-
-/** 捨てた件数・隔離した件数を足す。複数セッションの同時更新で数え漏れはありうる (目安の値)。 */
-export async function bumpStats($: Dollar, field: keyof Stats, n = 1): Promise<void> {
-  const stats = await readStats($)
-  stats[field] += n
-  await $.store.set(STATS_KEY, stats)
 }

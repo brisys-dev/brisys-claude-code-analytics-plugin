@@ -1,8 +1,3 @@
-import type { EngineInterface } from 'claude-code'
-
-/** フックが受け取るエンジンの API (`$`) */
-export type Dollar = EngineInterface
-
 export type JsonObject = Record<string, unknown>
 
 /**

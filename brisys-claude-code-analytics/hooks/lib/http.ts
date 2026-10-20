@@ -1,6 +1,4 @@
-// 送信と、応答ごとの扱いの判定。
-
-import type { Config, Dollar, JsonObject } from './types'
+// 送信の組み立てと、応答ごとの扱いの判定。送信そのもの (postJson) は register.ts にある。
 
 /**
  * base の scheme + host に path を継ぎ足す。base にパスが付いていても捨てる
@@ -29,33 +27,6 @@ export function parseRetryAfter(value: string | undefined): number | undefined {
 }
 
 export type PostResult = { kind: 'response'; status: number; retryAfterMs?: number } | { kind: 'error'; reason: string }
-
-/** JSON を POST する。通信の失敗も含めて例外は投げない。 */
-export async function postJson(
-  $: Dollar,
-  config: Config,
-  path: string,
-  body: JsonObject,
-  collectorVersion: string,
-): Promise<PostResult> {
-  if (!headerValuesAreSafe(config.apiKey, collectorVersion)) {
-    return { kind: 'error', reason: 'ヘッダ値に改行が含まれている' }
-  }
-  try {
-    const response = await $.http.fetch(joinUrl(config.apiUrl, path), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.apiKey}`,
-        'X-Collector-Version': collectorVersion,
-      },
-      body: JSON.stringify(body),
-    })
-    return { kind: 'response', status: response.status, retryAfterMs: parseRetryAfter(response.headers['retry-after']) }
-  } catch (error) {
-    return { kind: 'error', reason: error instanceof Error ? error.message : String(error) }
-  }
-}
 
 /**
  * 応答ごとの扱い。
