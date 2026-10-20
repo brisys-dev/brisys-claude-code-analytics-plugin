@@ -141,3 +141,9 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Claude Code が mod を読み込んだときにプラグインの中へ書き出す型定義と tsconfig
+# (対話セッションで --plugin-dir に渡すと書き出される)。Anthropic の生成物で版ごとに変わるうえ、
+# main の内容は public ミラーへ同期されるのでコミットしない
+brisys-claude-code-analytics/.claude-plugin/types/
+brisys-claude-code-analytics/tsconfig.json
