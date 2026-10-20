@@ -9,12 +9,6 @@
   },
   "plugins": [
     {
-      "name": "claude-code-analytics",
-      "source": "./claude-code-analytics",
-      "version": "2026.9.100",
-      "description": "Claude / Claude Code の利用統計を収集するプラグイン"
-    },
-    {
       "name": "brisys-claude-code-analytics",
       "source": "./brisys-claude-code-analytics",
       "version": "2026.10.102",
