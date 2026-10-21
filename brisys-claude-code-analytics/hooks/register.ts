@@ -23,15 +23,27 @@ import type { EngineInterface, Register } from 'claude-code'
 import { millisIso, originDiagnostics, secondsIso, sessionStartedBody, transcriptBatchBody } from './lib/body'
 import { firstNonEmpty } from './lib/config'
 import {
+  chooseSessionBuckets,
+  combineBucketResults,
   DELIVERY_OBSERVATION_VERSION,
   DISTRIBUTION_FILE,
   distributionLabel,
   distributionRepository,
+  type LoginAccount,
+  loginAccountFromClaudeJson,
   manifestVersion,
   pluginLocation,
-  type SyncedScan,
+  SYNC_MANIFEST_FILE,
+  type SyncedBucketResult,
+  type SyncManifestEntry,
   safeToken,
+  sessionBucketNames,
+  syncedBucketLayout,
+  syncedBucketResult,
+  syncedCopyDirName,
   syncedCopyFields,
+  syncManifestEntry,
+  UNMARKED_BUCKET,
 } from './lib/delivery'
 import { commandEvent, mayHoldDetection, type Row, skillEvents } from './lib/detect'
 import { extractOriginUrl, sanitizeRemoteUrl } from './lib/git'
@@ -83,8 +95,6 @@ const LOCAL_COMMAND_TIMEOUT_MS = 5000
 const MAX_PARENT_HOPS = 32
 /** gitfile の `gitdir:` を辿る回数の上限 (循環対策)。 */
 const MAX_GITFILE_HOPS = 5
-/** 組織同期の写しを探すとき、見る bucket (アカウントごとのディレクトリ) の数の上限。 */
-const MAX_SYNCED_BUCKETS = 20
 
 type SessionInfo = { cwd: string; transcriptPath: string }
 type StoredOrigin = { v: 1; createdAt: number; origin: Origin }
@@ -226,6 +236,15 @@ async function claudeConfigDir($: Dollar): Promise<{ dir: string; explicit: bool
   return home === undefined ? undefined : { dir: joinPath(home, '.claude'), explicit: false }
 }
 
+/**
+ * 今使っている設定のログイン記録 (`.claude.json`)。`CLAUDE_CONFIG_DIR` があればその下、無ければ
+ * ホームの直下 (`~/.claude/` の中ではない)。別の設定ディレクトリのログイン記録には後退しない。
+ */
+async function loginRecordPath($: Dollar): Promise<string | undefined> {
+  const base = firstNonEmpty(await $.env.get('CLAUDE_CONFIG_DIR')) ?? (await homeDir($))
+  return base === undefined ? undefined : joinPath(base, '.claude.json')
+}
+
 // ---- ファイルとプロセス (失敗はすべて undefined にして呼び出し元で後退させる) ----
 
 /** パスの種類。存在しなければ undefined。 */
@@ -355,9 +374,9 @@ async function resolveEmail(
 ): Promise<{ email: string; source: EmailSource } | undefined> {
   if (cfg.emailOverride) return { email: cfg.emailOverride, source: 'override' }
   if (telemetryEmail) return { email: telemetryEmail, source: 'telemetry' }
-  const base = firstNonEmpty(await $.env.get('CLAUDE_CONFIG_DIR')) ?? (await homeDir($))
-  if (!base) return undefined
-  const text = await readText($, joinPath(base, '.claude.json'))
+  const path = await loginRecordPath($)
+  if (!path) return undefined
+  const text = await readText($, path)
   const email = text === undefined ? undefined : emailFromClaudeJson(text)
   return email ? { email, source: 'login-record' } : undefined
 }
@@ -460,16 +479,16 @@ async function observeDelivery($: Dollar): Promise<JsonObject> {
   const location = pluginLocation($.plugin.root)
   // --plugin-dir などで場所から分からないときは、今のセッションの設定ディレクトリを見る
   const configDir = location.configDir ?? (await claudeConfigDir($))?.dir
-  const scan: SyncedScan =
+  const synced: SyncedBucketResult =
     configDir === undefined
-      ? { found: 0, versions: [], complete: false, error: 'unrecognized_root' }
-      : await scanSyncedCopies($, configDir)
+      ? { kind: 'unknown', error: 'unrecognized_root' }
+      : await probeSessionSyncedCopy($, configDir, location.bucket)
   return {
     delivery_observation_version: DELIVERY_OBSERVATION_VERSION,
     delivery_repository: await deliveryRepository($),
     delivery: location.route,
     delivery_marketplace: distributionLabel(location.marketplace),
-    ...syncedCopyFields(scan),
+    ...syncedCopyFields(synced),
   }
 }
 
@@ -482,31 +501,74 @@ async function deliveryRepository($: Dollar): Promise<string | null> {
 }
 
 /**
- * `<設定ディレクトリ>/plugins/synced/<bucket>/<このプラグイン>/.claude-plugin/plugin.json` を数える。
- * bucket はアカウントごとのディレクトリで、名前にアカウントの uuid を含むので送らない。
+ * このセッションの bucket (Claude Code が写しを読み込む bucket) に、組織同期の写しがあるかを確かめる
+ * (bucket の選び方は lib/delivery.ts の「このセッションの bucket」、写しの決め方は「組織同期の写し」)。
+ * bucket の名前はアカウントの uuid を含むので送らない。
+ *
+ * @param syncedBucket 組織同期から読み込まれた mod なら、読み込まれた bucket (本体はそこから読み込んだ)
  */
-async function scanSyncedCopies($: Dollar, configDir: string): Promise<SyncedScan> {
+async function probeSessionSyncedCopy(
+  $: Dollar,
+  configDir: string,
+  syncedBucket: string | undefined,
+): Promise<SyncedBucketResult> {
   const syncedRoot = joinPath(joinPath(configDir, 'plugins'), 'synced')
-  const scan: SyncedScan = { found: 0, versions: [], complete: true }
   try {
     // 同期の置き場が無いのは、組織同期が届いていないということ (調べられなかったのとは違う)
-    if (!(await $.fs.exists(syncedRoot))) return scan
-    const buckets = (await $.fs.list(syncedRoot)).filter((entry) => entry.kind === 'dir' && !entry.name.startsWith('.'))
-    for (const [index, bucket] of buckets.entries()) {
-      if (index >= MAX_SYNCED_BUCKETS) return { ...scan, complete: false, error: 'limit_exceeded' }
-      const manifest = joinPath(
-        joinPath(joinPath(joinPath(syncedRoot, bucket.name), $.plugin.name), '.claude-plugin'),
-        'plugin.json',
-      )
-      if (!(await $.fs.exists(manifest))) continue
-      scan.found += 1
-      const text = await readText($, manifest)
-      scan.versions.push(text === undefined ? undefined : manifestVersion(text))
+    if (!(await $.fs.exists(syncedRoot))) return { kind: 'absent' }
+    const entries = await $.fs.list(syncedRoot)
+    const candidates = syncedBucket === undefined ? await sessionBucketCandidates($) : [syncedBucket]
+    const choice = chooseSessionBuckets(entries, candidates)
+    if (choice.kind === 'decided') return choice.result
+    const results: SyncedBucketResult[] = []
+    for (const bucket of choice.buckets) {
+      results.push(bucket.marked ? await probeSyncedBucket($, joinPath(syncedRoot, bucket.name)) : UNMARKED_BUCKET)
     }
-    return scan
+    return combineBucketResults(results)
   } catch {
-    return { ...scan, complete: false, error: 'io_error' }
+    return { kind: 'unknown', error: 'io_error' }
   }
+}
+
+/**
+ * このセッションの bucket の名前の候補。ログイン記録と、ホストが渡す
+ * CLAUDE_CODE_ORGANIZATION_UUID / CLAUDE_CODE_ACCOUNT_UUID から、本体と同じ規則で作る。
+ * ログイン記録があるのに読めなければ undefined (候補を決められない)。
+ */
+async function sessionBucketCandidates($: Dollar): Promise<string[] | undefined> {
+  const path = await loginRecordPath($)
+  if (path === undefined) return undefined
+  const text = await readText($, path)
+  let login: LoginAccount | undefined
+  if (text !== undefined) login = loginAccountFromClaudeJson(text)
+  // ログイン記録が無いのは、ログインしていないということ (読めないのとは違う)
+  else if (!(await $.fs.exists(path))) login = {}
+  return sessionBucketNames(login, {
+    organizationUuid: await $.env.get('CLAUDE_CODE_ORGANIZATION_UUID'),
+    accountUuid: await $.env.get('CLAUDE_CODE_ACCOUNT_UUID'),
+  })
+}
+
+/**
+ * 1 つの bucket を調べる。manifest.json を読み、manifest が指す世代の写し
+ * (`<このプラグイン>` か `<このプラグイン>~g<世代>`) の `.claude-plugin/plugin.json` を確かめる。
+ * manifest が指す写しは、一覧に無くても直接確かめる (一覧を取った後に置かれた写しを見落とさない)。
+ */
+async function probeSyncedBucket($: Dollar, bucketDir: string): Promise<SyncedBucketResult> {
+  const layout = syncedBucketLayout(await $.fs.list(bucketDir), $.plugin.name)
+  const entry: SyncManifestEntry = layout.hasSyncManifest
+    ? syncManifestEntry(await readText($, joinPath(bucketDir, SYNC_MANIFEST_FILE)), $.plugin.name)
+    : { kind: 'missing' }
+  let designatedCopy: { version: string | undefined } | undefined
+  if (entry.kind === 'listed') {
+    const copyDir = joinPath(bucketDir, syncedCopyDirName($.plugin.name, entry.generation))
+    const pluginJson = joinPath(joinPath(copyDir, '.claude-plugin'), 'plugin.json')
+    if (await $.fs.exists(pluginJson)) {
+      const text = await readText($, pluginJson)
+      designatedCopy = { version: text === undefined ? undefined : manifestVersion(text) }
+    }
+  }
+  return syncedBucketResult(entry, designatedCopy, layout.hasCopyDir)
 }
 
 /** Claude Code の起動のしかた (`CLAUDE_CODE_ENTRYPOINT`。cli・claude-desktop・sdk-ts など)。 */
