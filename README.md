@@ -130,8 +130,8 @@ Claude Code に managed settings (`extraKnownMarketplaces` / `enabledPlugins`) �
 - Claude (Web / Desktop / Cowork): 正本の private リポジトリを、管理コンソールの組織同期で配布
 - Claude Code: この public ミラーを、managed settings で配布
 
-2026-10 時点では、組織同期のプラグインも Claude Code に `<name>@synced` として届きます (claude.ai の
-アカウントでサインインしたターミナルのセッション、v2.1.273 以降)。ただし、Desktop の Code タブと VS Code
+組織同期のプラグインも、Claude Code に `<name>@synced` として届きます (claude.ai のアカウントで
+サインインしたターミナルのセッション、v2.1.273 以降)。ただし、Desktop の Code タブと VS Code
 への配布はドキュメントに書かれておらず、OAuth トークンや API キーで認証するセッションには届きません。
 利用者が `syncClaudeAiPlugins: false` を設定すると止まります。そのため managed settings の経路を残しています。
 両方から届いたときは managed settings 側だけが読み込まれ、二重には収集しません。
