@@ -1,121 +1,94 @@
 # brisys-claude-code-analytics-plugin
 
-Claude Code の利用統計を収集し、分析基盤 (ai-analytics) に送信する Claude Code プラグインのマーケットプレイスです。
+Claude Code の利用統計を集めて分析基盤 (ai-analytics) に送るプラグイン `brisys-claude-code-analytics` の、
+Claude Code 向けマーケットプレイスです。
 
-セッション・プロンプト送信・ツール使用・スキル/コマンド実行・サブエージェント・モデル別トークン使用量などのイベントを Claude Code の [hooks](https://code.claude.com/docs/en/hooks) で捕捉し、HTTP API へ送信します。
+プラグインは mod (Claude Code の中で動く TypeScript の hooks module) なので、配るバイナリが無く、
+Node.js も要りません。
 
-> このリポジトリは正本リポジトリ ([brisys-dev/brisys-claude-analytics-plugin](https://github.com/brisys-dev/brisys-claude-analytics-plugin), private) からの**自動同期ミラー**です。プラグイン本体への変更は正本側で行われ、main への push ごとに同期されます (README / AGENTS.md / CLAUDE.md / LICENSE を除く)。
+> このリポジトリは正本リポジトリ
+> ([brisys-dev/brisys-claude-analytics-plugin](https://github.com/brisys-dev/brisys-claude-analytics-plugin), private)
+> からの**自動同期ミラー**です。プラグインへの変更は正本で行い、main への push ごとにここへ同期されます
+> (README.md / AGENTS.md / CLAUDE.md / LICENSE は、このリポジトリで管理します)。
 
 ## 構成
 
 ```
-.claude-plugin/marketplace.json   # マーケットプレイス定義
-claude-code-analytics/            # プラグイン本体
-├── .claude-plugin/plugin.json    # プラグインマニフェスト
-├── hooks/hooks.json              # hook 定義 (捕捉イベントとコマンド)
-└── scripts/send-hook-event.mjs   # コレクタ (依存ゼロの Node.js スクリプト)
+.claude-plugin/marketplace.json     # マーケットプレイス定義 (name: brisys-claude-code-analytics-plugin)
+brisys-claude-code-analytics/       # プラグイン本体
+├── .claude-plugin/plugin.json      # プラグインマニフェスト
+├── hooks/hooks.json                # { "modules": ["./register.ts"] }
+├── hooks/register.ts               # イベントの配線と、エンジンの API を使う処理
+├── hooks/lib/                      # 検出・送信 body・outbox の形式などの関数
+└── distribution.json               # 配布物の出どころ (このミラーでは同期のときに書き換わる)
 ```
 
-## アーキテクチャ
+## 送るもの
 
-```mermaid
-flowchart LR
-    subgraph client["開発者マシン"]
-        CC[Claude Code] -->|"hook (stdin: JSON)"| COL["send-hook-event.mjs"]
-    end
-    COL -->|"POST /api/v1/events"| API["分析 API"]
-    COL -->|"POST /api/v1/transcript-events"| API
-    API --> DWH[("データ基盤")]
-```
+プラグインが送るのは 3 種類だけです。ほかの利用状況は Claude Code 本体が送り
+(Team settings の `type: "http"` hook と OpenTelemetry)、このプラグインは関与しません。
 
-## 捕捉イベント
+| 送るもの | 送信先 | 内容 |
+|---|---|---|
+| `session.started` | `POST /api/v1/events` | セッションの開始 (`/clear` の後の新しいセッションも含む) |
+| `transcript.command_detected` | `POST /api/v1/transcript-events` | スラッシュコマンドの実行 (コマンド名だけ) |
+| `transcript.skill_detected` | `POST /api/v1/transcript-events` | Skill ツールの呼び出し (スキル名だけ。サブエージェントなら種類も付ける) |
 
-| hook イベント | 送信 event_type | 実行 | 内容 |
-|---|---|---|---|
-| SessionStart | `session.started` | async | セッション開始 |
-| SessionEnd | `session.ended` | async | セッション終了 + transcript 解析 (トークン集計 / スキル / コマンド検出) |
-| UserPromptSubmit | `message.submitted` | async | プロンプト送信 (本文は送信しない) |
-| PreToolUse (Edit\|Write) | — (送信なし) | sync | 行数統計用のファイルスナップショット取得のみ |
-| PostToolUse (Skill\|Agent\|EnterPlanMode\|ExitPlanMode\|mcp__.*\|Edit\|Write) | `tool.used` | sync | ツール使用 (Edit/Write は行数統計付き) |
-| PostToolUseFailure (同上) | `tool.failed` | sync | ツール失敗 |
-| SubagentStart | `subagent.started` | async | サブエージェント開始 |
-| SubagentStop | `subagent.completed` | async | サブエージェント終了 + agent transcript 解析 |
-
-SessionEnd / SubagentStop では transcript (JSONL) を解析し、以下を `transcript-events` として送信します。
-
-- `transcript.token_usage` — モデル別のトークン使用量 (input / output / cache、requestId 単位で集計)
-- `transcript.skill_detected` — Skill ツールの呼び出し (スキル名のみ、引数は送らない)
-- `transcript.command_detected` — スラッシュコマンドの実行 (コマンド名のみ、引数は送らない)
+見つけたものは手元の `$.store` に保存し、ターンの完了・30 秒ごと・セッションの終了で送ります。
+送れなかったものは間隔を広げて送り直し、7 日で捨てます。
 
 ## プライバシー — 送信されるもの / されないもの
 
 **送信されるもの**
 
-- イベントメタデータ (セッション ID、イベント種別、時刻、ホスト名)
-- アカウント識別用の email (解決方法は後述)
-- プロジェクト (git リポジトリのルートパス、なければ cwd)
-- ツール名・対象ファイルパス・行数統計 (追加/削除/変更行数)
-- スキル名・コマンド名 (引数の有無フラグのみ。引数の内容は送らない)
-- モデル別トークン使用量
+- イベントメタデータ (セッション ID、イベント種別、時刻、ホスト名、OS)
+- アカウント識別用の email
+- プロジェクト (git リポジトリのルートパス、なければ cwd) と git remote URL。URL に埋め込まれた
+  資格情報 (`https://user:token@host/...` の `user:token@`) は外して送ります
+- プラグインの版、Claude Code の版、モデル名
+- スキル名・コマンド名 (引数の有無フラグだけ。引数の内容は送りません)
+- 配布の経路: どのリポジトリの配布物か、組織同期かマーケットプレイスか、組織同期の写しの有無と版、
+  画面の種類 (terminal / desktop など)、起動のしかた
 
 **送信されないもの**
 
 - プロンプト本文
-- 編集内容 — Edit の `old_string` / `new_string`、Write の `content` は `[REDACTED]` に置換
-- アシスタントの応答本文 (`last_assistant_message`)
-- ツールの実行結果 (`tool_response`)
+- 編集内容 (Edit / Write に渡した中身)
+- アシスタントの応答本文
+- ツールの実行結果
 
-## なぜ managed settings 経由で配布しているか (Claude 管理コンソールは Claude Code CLI に届かない)
-
-Claude 管理コンソール (Organization settings > Plugins) で登録した組織プラグインの配信先は **Claude Web / Claude Desktop / Cowork のみ**で、**Claude Code CLI には配信されない** (2026-07 時点で確認)。加えて組織マーケットプレイスに接続できるのは private リポジトリ限定です。そのため:
-
-- Chat / Desktop / Cowork 面 — 正本の private リポジトリを管理コンソールから配布
-- Claude Code CLI 面 — この public ミラーを Team settings (managed settings) の `extraKnownMarketplaces` / `enabledPlugins` で配布
-
-という面ごとに配布経路を分けた運用になっています。CLI 側が管理コンソール配信に将来対応したらこの public ミラー経路は畳んで管理コンソール一本化に戻す想定です (追跡は下記 issue #9756 で可能)。
-
-### 参照
-
-- 公式ヘルプ
-  - [Manage plugins for your organization](https://support.claude.com/en/articles/13837433-manage-plugins-for-your-organization) — 組織マーケットプレイスは private リポジトリ限定 (public は不可)
-  - [Use plugins in Claude](https://support.claude.com/en/articles/13837440-use-plugins-in-claude)
-- 公式ドキュメント
-  - [Create and distribute a plugin marketplace (Claude Code Docs)](https://code.claude.com/docs/en/plugin-marketplaces) — CLI への配布は managed settings 経由のみ
-- GitHub Issue (未解決)
-  - [anthropics/claude-code#9756 — Support Auth on Private Marketplaces and Plugins](https://github.com/anthropics/claude-code/issues/9756)
-  - [anthropics/claude-code#74923 — GITHUB_TOKEN shadows gh CLI credentials](https://github.com/anthropics/claude-code/issues/74923)
-- 実践者検証
-  - [Sean Lynch — How to manage Claude Teams/Enterprise Plugins, Connectors, and Skills](https://sean.lyn.ch/claude-org-plugins-connectors-skills/) — 「org-level plugins skip Claude Code entirely」と明言
-  - [Private Marketplace and Private Plugins Claude Code (gist)](https://gist.github.com/gwpl/103c997128c6b6a6102e2a4a6cf8d283)
-
-## インストール
-
-チームのメンバーには Team settings (managed settings) の `extraKnownMarketplaces` / `enabledPlugins` で自動配布されるため、通常は手動インストール不要です。
-
-手動でインストールする場合は Claude Code で以下を実行します。
-
-```
-/plugin marketplace add brisys-dev/brisys-claude-code-analytics-plugin
-/plugin install claude-code-analytics@brisys-claude-code-analytics-plugin
-```
+送れなかったものは、送れるまで手元の `$.store` (Claude Code の設定ディレクトリの `plugins/store/`) に
+残ります。中身は送るものと同じで、プロンプトや応答の本文は含みません。
 
 ## 要件
 
-- **Node.js 18 以降** — コレクタは Node.js で動作します (外部依存なし)。Node.js が無い環境では統計は送信されません (Claude Code の動作自体には影響しません)
-- 分析 API のエンドポイント URL と API キー
+- Claude Code 2.1.287 以降 (Desktop は 2.1.286 以降)。それより古い版では読み込まれません
+- 分析 API の URL と API キー (環境変数で渡します)
+
+## インストール
+
+チームのメンバーには Team settings (managed settings) の `extraKnownMarketplaces` / `enabledPlugins` で
+自動で配布されるので、通常は手動でのインストールは要りません。手動で入れるときは、Claude Code で次を
+実行します。
+
+```
+/plugin marketplace add brisys-dev/brisys-claude-code-analytics-plugin
+/plugin install brisys-claude-code-analytics@brisys-claude-code-analytics-plugin
+```
 
 ## 設定
 
-環境変数で設定します。シェルの設定ファイル、または Claude Code の `settings.json` の `env` セクションで指定してください。
+環境変数で設定します。シェルの設定ファイルか、Claude Code の `settings.json` の `env` に書いてください。
 
 | 環境変数 | 必須 | 説明 |
 |---|---|---|
 | `AI_ANALYTICS_API_URL` | ✅ | 分析 API のベース URL |
 | `AI_ANALYTICS_API_KEY` | ✅ | Bearer トークン |
-| `AI_ANALYTICS_USER_EMAIL` | — | email の明示指定 (自動解決を上書き) |
-| `AI_ANALYTICS_PROJECT` | — | プロジェクト名の明示指定 (git root 解決を上書き) |
-| `AI_ANALYTICS_STATE_DIR` | — | 行数統計用スナップショットの保存先 (デフォルト: 一時ディレクトリ) |
-| `AI_ANALYTICS_DEV_API_URL` / `AI_ANALYTICS_DEV_API_KEY` | — | 開発用の上書き (通常設定より優先) |
+| `AI_ANALYTICS_USER_EMAIL` | — | email の明示指定 (ログインしていない実行など) |
+| `AI_ANALYTICS_PROJECT` | — | プロジェクト名の明示指定 (git のルートより優先) |
+| `AI_ANALYTICS_DISABLE_GIT_REMOTE` | — | `1` で git remote URL を送らない |
+| `AI_ANALYTICS_DEBUG` | — | `1` で送信の成功も debug log に出す |
+| `AI_ANALYTICS_DEV_API_URL` / `AI_ANALYTICS_DEV_API_KEY` | — | 検証用の上書き (通常の設定より優先) |
 
 `settings.json` での設定例:
 
@@ -128,26 +101,54 @@ Claude 管理コンソール (Organization settings > Plugins) で登録した�
 }
 ```
 
-**フェイルセーフ**: `AI_ANALYTICS_API_URL` / `AI_ANALYTICS_API_KEY` が未設定の場合、または email が解決できない場合は何も送信せず正常終了します。送信エラーもすべて握りつぶし、Claude Code の動作をブロックしません。
+**フェイルセーフ**: URL かキーが無いとき、email が決まらないときは何も送りません。送信に失敗しても、
+Claude Code の操作は止めません。
 
-### email の解決順序
+### email の決め方
 
-1. `AI_ANALYTICS_USER_EMAIL` 環境変数
-2. `~/.claude.json` の OAuth ログイン情報 (`oauthAccount.emailAddress`)
-3. `git config --global user.email`
+1. `AI_ANALYTICS_USER_EMAIL`
+2. 同じセッションのテレメトリの `user.email` (OpenTelemetry と同じ、実際にログインしているアカウント)
+3. 今使っている設定ディレクトリの `.claude.json` (`CLAUDE_CONFIG_DIR` があればそこ、無ければ `~/.claude.json`)
+
+どれでも決まらなければ、そのセッションは送りません。
 
 ## トラブルシューティング
 
-イベントが届かない場合:
+イベントが届かないときは、`claude --debug` の debug log を見てください。
 
-1. `node --version` — Node.js がインストールされているか
-2. `AI_ANALYTICS_API_URL` / `AI_ANALYTICS_API_KEY` が hook プロセスに渡っているか (`settings.json` の `env` 推奨)
-3. email が解決できているか (上記の解決順序を確認)
-4. `claude --debug hooks` で hook の実行ログを確認
+1. `hooks module brisys-claude-code-analytics@brisys-claude-code-analytics-plugin loaded` があるか。
+   無ければ、プラグインが入っていないか、Claude Code が古い
+2. `[analytics]` で始まる行。送信の失敗が出ます (成功も見たいときは `AI_ANALYTICS_DEBUG=1`)
+3. 送れずに残っているもの。`<設定ディレクトリ>/plugins/store/` の、このプラグイン名で始まる JSON にあります
+
+## なぜ managed settings 経由で配布しているか
+
+Claude の管理コンソールの組織マーケットプレイスに接続できるのは、private リポジトリだけです。一方で、
+Claude Code に managed settings (`extraKnownMarketplaces` / `enabledPlugins`) で全員に配るには、どの端末も
+認証なしで clone できるリポジトリが要ります。そのため、面ごとに経路を分けています。
+
+- Claude (Web / Desktop / Cowork): 正本の private リポジトリを、管理コンソールの組織同期で配布
+- Claude Code: この public ミラーを、managed settings で配布
+
+2026-10 時点では、組織同期のプラグインも Claude Code に `<name>@synced` として届きます (claude.ai の
+アカウントでサインインしたターミナルのセッション、v2.1.273 以降)。ただし、Desktop の Code タブと VS Code
+への配布はドキュメントに書かれておらず、OAuth トークンや API キーで認証するセッションには届きません。
+利用者が `syncClaudeAiPlugins: false` を設定すると止まります。そのため managed settings の経路を残しています。
+両方から届いたときは managed settings 側だけが読み込まれ、二重には収集しません。
+
+### 参照
+
+- 公式ヘルプ
+  - [Manage plugins for your organization](https://support.claude.com/en/articles/13837433-manage-plugins-for-your-organization) — 組織マーケットプレイスは private リポジトリ限定 (public は不可)
+  - [Use plugins in Claude](https://support.claude.com/en/articles/13837440-use-plugins-in-claude)
+- 公式ドキュメント
+  - [Create and distribute a plugin marketplace (Claude Code Docs)](https://code.claude.com/docs/en/plugin-marketplaces)
+  - [Plugins synced from claude.ai](https://code.claude.com/docs/en/plugins/loading#synced-plugins)
+- GitHub Issue
+  - [anthropics/claude-code#9756 — Support Auth on Private Marketplaces and Plugins](https://github.com/anthropics/claude-code/issues/9756)
+  - [anthropics/claude-code#74923 — GITHUB_TOKEN shadows gh CLI credentials](https://github.com/anthropics/claude-code/issues/74923)
 
 ## 開発
 
-プラグイン本体の開発は正本リポジトリ ([brisys-dev/brisys-claude-analytics-plugin](https://github.com/brisys-dev/brisys-claude-analytics-plugin)) で行っています。このリポジトリで直接管理しているのは README / AGENTS.md / CLAUDE.md / LICENSE のみで、それ以外への直接コミットは次回同期で上書きされます。
-
-- マーケットプレイス仕様: https://code.claude.com/docs/en/plugin-marketplaces.md
-- 不具合報告・改善要望はこのリポジトリの [Issues](https://github.com/brisys-dev/brisys-claude-code-analytics-plugin/issues) へ
+プラグインの開発は正本リポジトリで行います。このリポジトリで直接管理しているのは README.md / AGENTS.md /
+CLAUDE.md / LICENSE だけで、それ以外への直接のコミットは次の同期で上書きされます。
