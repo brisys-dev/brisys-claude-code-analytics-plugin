@@ -70,14 +70,3 @@ export function subagentTranscriptPath(mainPath: string, sessionId: string, agen
   const dir = parentDir(mainPath) ?? ''
   return joinPath(joinPath(joinPath(dir, sessionId), 'subagents'), `agent-${agentId}.jsonl`)
 }
-
-/**
- * このプラグインがどの経路で読み込まれたか (診断用)。
- * claude.ai の組織同期なら `plugins/synced/`、マーケットプレイスからなら `plugins/cache/` の下にある。
- */
-export function deliveryRoute(pluginRoot: string): 'synced' | 'marketplace' | 'local' {
-  const normalized = pluginRoot.replaceAll('\\', '/')
-  if (normalized.includes('/plugins/synced/')) return 'synced'
-  if (normalized.includes('/plugins/cache/')) return 'marketplace'
-  return 'local'
-}

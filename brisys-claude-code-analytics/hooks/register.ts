@@ -22,6 +22,17 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { millisIso, originDiagnostics, secondsIso, sessionStartedBody, transcriptBatchBody } from './lib/body'
 import { firstNonEmpty } from './lib/config'
+import {
+  DELIVERY_OBSERVATION_VERSION,
+  DISTRIBUTION_FILE,
+  distributionLabel,
+  distributionRepository,
+  manifestVersion,
+  pluginLocation,
+  type SyncedScan,
+  safeToken,
+  syncedCopyFields,
+} from './lib/delivery'
 import { commandEvent, mayHoldDetection, type Row, skillEvents } from './lib/detect'
 import { extractOriginUrl, sanitizeRemoteUrl } from './lib/git'
 import { classify, headerValuesAreSafe, joinUrl, type PostResult, parseRetryAfter } from './lib/http'
@@ -38,7 +49,6 @@ import {
   type Stats,
 } from './lib/outbox'
 import {
-  deliveryRoute,
   gitStylePath,
   isAbsolutePath,
   joinPath,
@@ -73,6 +83,8 @@ const LOCAL_COMMAND_TIMEOUT_MS = 5000
 const MAX_PARENT_HOPS = 32
 /** gitfile の `gitdir:` を辿る回数の上限 (循環対策)。 */
 const MAX_GITFILE_HOPS = 5
+/** 組織同期の写しを探すとき、見る bucket (アカウントごとのディレクトリ) の数の上限。 */
+const MAX_SYNCED_BUCKETS = 20
 
 type SessionInfo = { cwd: string; transcriptPath: string }
 type StoredOrigin = { v: 1; createdAt: number; origin: Origin }
@@ -88,6 +100,11 @@ let delivering: Promise<void> | undefined
 let stopAt: number | undefined
 let hostCache: { hostname: string; platform: string } | undefined
 let versionCache: string | undefined
+let repositoryCache: string | null | undefined
+let entrypointCache: string | null | undefined
+// 直近の session.start の入力。/clear の後のセッションも同じ画面・同じ起動のしかたなので引き継ぐ
+let lastSurface: string | null = null
+let lastInteractive: boolean | null = null
 const sessions = new Map<string, SessionInfo>()
 const emailBySession = new Map<string, string>()
 const agentTypes = new Map<string, string>()
@@ -102,7 +119,7 @@ export const register: Register = (on) => {
 
   on('session.start', async ($, e, next) => {
     const result = await next(e)
-    await guard($, 'session.start', () => onSessionStart($, e.cwd))
+    await guard($, 'session.start', () => onSessionStart($, e.cwd, e.surface ?? null, e.isInteractive ?? null))
     return result
   })
 
@@ -433,6 +450,71 @@ async function originFor($: Dollar, cfg: Config, record: OutboxRecord, now: numb
   return origin
 }
 
+// ---- 配布経路の診断 (lib/delivery.ts の説明を参照) ----
+
+/**
+ * どこから届いたこのプラグインが送っているかと、組織同期の写しが届いているか。
+ * session.started の payload に載せる。読めないものは null や unknown にして、送信は止めない。
+ */
+async function observeDelivery($: Dollar): Promise<JsonObject> {
+  const location = pluginLocation($.plugin.root)
+  // --plugin-dir などで場所から分からないときは、今のセッションの設定ディレクトリを見る
+  const configDir = location.configDir ?? (await claudeConfigDir($))?.dir
+  const scan: SyncedScan =
+    configDir === undefined
+      ? { found: 0, versions: [], complete: false, error: 'unrecognized_root' }
+      : await scanSyncedCopies($, configDir)
+  return {
+    delivery_observation_version: DELIVERY_OBSERVATION_VERSION,
+    delivery_repository: await deliveryRepository($),
+    delivery: location.route,
+    delivery_marketplace: distributionLabel(location.marketplace),
+    ...syncedCopyFields(scan),
+  }
+}
+
+/** 配布物の `distribution.json` に書かれたリポジトリ (正本か public ミラーか)。 */
+async function deliveryRepository($: Dollar): Promise<string | null> {
+  if (repositoryCache !== undefined) return repositoryCache
+  const text = await readText($, joinPath($.plugin.root, DISTRIBUTION_FILE))
+  repositoryCache = distributionLabel(text === undefined ? undefined : distributionRepository(text))
+  return repositoryCache
+}
+
+/**
+ * `<設定ディレクトリ>/plugins/synced/<bucket>/<このプラグイン>/.claude-plugin/plugin.json` を数える。
+ * bucket はアカウントごとのディレクトリで、名前にアカウントの uuid を含むので送らない。
+ */
+async function scanSyncedCopies($: Dollar, configDir: string): Promise<SyncedScan> {
+  const syncedRoot = joinPath(joinPath(configDir, 'plugins'), 'synced')
+  const scan: SyncedScan = { found: 0, versions: [], complete: true }
+  try {
+    // 同期の置き場が無いのは、組織同期が届いていないということ (調べられなかったのとは違う)
+    if (!(await $.fs.exists(syncedRoot))) return scan
+    const buckets = (await $.fs.list(syncedRoot)).filter((entry) => entry.kind === 'dir' && !entry.name.startsWith('.'))
+    for (const [index, bucket] of buckets.entries()) {
+      if (index >= MAX_SYNCED_BUCKETS) return { ...scan, complete: false, error: 'limit_exceeded' }
+      const manifest = joinPath(
+        joinPath(joinPath(joinPath(syncedRoot, bucket.name), $.plugin.name), '.claude-plugin'),
+        'plugin.json',
+      )
+      if (!(await $.fs.exists(manifest))) continue
+      scan.found += 1
+      const text = await readText($, manifest)
+      scan.versions.push(text === undefined ? undefined : manifestVersion(text))
+    }
+    return scan
+  } catch {
+    return { ...scan, complete: false, error: 'io_error' }
+  }
+}
+
+/** Claude Code の起動のしかた (`CLAUDE_CODE_ENTRYPOINT`。cli・claude-desktop・sdk-ts など)。 */
+async function entrypoint($: Dollar): Promise<string | null> {
+  if (entrypointCache === undefined) entrypointCache = safeToken(await $.env.get('CLAUDE_CODE_ENTRYPOINT'))
+  return entrypointCache
+}
+
 // ---- outbox ($.store) ----
 
 /** まだ無ければ保存する (同じキーの本文を書き換えない)。保存したら true。 */
@@ -465,7 +547,14 @@ function startTimer($: Dollar): void {
 }
 
 /** session.start: 起動・再開したセッションを記録し、送信の timer を始める。 */
-async function onSessionStart($: Dollar, cwd: string): Promise<void> {
+async function onSessionStart(
+  $: Dollar,
+  cwd: string,
+  surface: string | null,
+  interactive: boolean | null,
+): Promise<void> {
+  lastSurface = surface
+  lastInteractive = interactive
   if (!(await loadConfig($))) return
   const sessionId = await $.session.id()
   currentSessionId = sessionId
@@ -518,7 +607,10 @@ async function noteSession($: Dollar, sessionId: string, cwd: string, source: st
     transcript_path: info.transcriptPath,
     claude_code_version: (await $.session.version()).version,
     collector_kind: 'mod',
-    delivery: deliveryRoute($.plugin.root),
+    ...(await observeDelivery($)),
+    surface: safeToken(lastSurface),
+    interactive: lastInteractive,
+    entrypoint: await entrypoint($),
     outbox_pending: snapshot.pending,
     outbox_oldest_age_seconds: snapshot.oldestAgeSeconds,
     outbox_dropped_total: snapshot.dropped,
