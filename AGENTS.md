@@ -2,7 +2,9 @@
 
 Claude Code 向け利用統計プラグイン `brisys-claude-code-analytics` (mod) のマーケットプレイス。
 **正本リポジトリ ([brisys-dev/brisys-claude-analytics-plugin](https://github.com/brisys-dev/brisys-claude-analytics-plugin), private) からの自動同期ミラー**であり、
-チームには Team settings (managed settings) の `extraKnownMarketplaces` で配布される。
+チームのメンバーには、正本を管理コンソールの組織同期で配る (Claude Code にも届く)。このミラーは、組織同期が
+届かない環境 (OAuth トークンで動かす CI など) のためにある。Team settings (managed settings) では有効にしない
+(有効にすると、同じ名前の組織同期の版より優先される)。
 
 ## ルール
 

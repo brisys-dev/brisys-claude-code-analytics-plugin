@@ -67,9 +67,9 @@ brisys-claude-code-analytics/       # プラグイン本体
 
 ## インストール
 
-チームのメンバーには Team settings (managed settings) の `extraKnownMarketplaces` / `enabledPlugins` で
-自動で配布されるので、通常は手動でのインストールは要りません。手動で入れるときは、Claude Code で次を
-実行します。
+チームのメンバーには管理コンソールの組織同期で自動で配布されるので、手動でのインストールは要りません
+(手動で入れると、組織同期の版より優先して読み込まれます)。組織同期が届かない環境 (OAuth トークンや
+API キーで動かす CI など) で入れるときは、Claude Code で次を実行します。
 
 ```
 /plugin marketplace add brisys-dev/brisys-claude-code-analytics-plugin
@@ -116,25 +116,28 @@ Claude Code の操作は止めません。
 
 イベントが届かないときは、`claude --debug` の debug log を見てください。
 
-1. `hooks module brisys-claude-code-analytics@brisys-claude-code-analytics-plugin loaded` があるか。
-   無ければ、プラグインが入っていないか、Claude Code が古い
+1. `hooks module brisys-claude-code-analytics@... loaded` があるか。`@` の後ろは届き方で変わります
+   (CLI と VS Code の組織同期なら `@synced`、上の手順で入れたならこのミラーのマーケットプレイス名)。
+   無ければ、プラグインが届いていないか、Claude Code が古い
 2. `[analytics]` で始まる行。送信の失敗が出ます (成功も見たいときは `AI_ANALYTICS_DEBUG=1`)
 3. 送れずに残っているもの。`<設定ディレクトリ>/plugins/store/` の、このプラグイン名で始まる JSON にあります
 
-## なぜ managed settings 経由で配布しているか
+## 配布のしかた
 
-Claude の管理コンソールの組織マーケットプレイスに接続できるのは、private リポジトリだけです。一方で、
-Claude Code に managed settings (`extraKnownMarketplaces` / `enabledPlugins`) で全員に配るには、どの端末も
-認証なしで clone できるリポジトリが要ります。そのため、面ごとに経路を分けています。
+Claude の管理コンソールの組織マーケットプレイスに接続できるのは、private リポジトリだけです。そのため、
+プラグインの正本は private リポジトリに置き、管理コンソールの組織同期でメンバーに配っています。
+Claude Code にもこの経路で届き、届き方は起動のしかたで 2 つあります。
 
-- Claude (Web / Desktop / Cowork): 正本の private リポジトリを、管理コンソールの組織同期で配布
-- Claude Code: この public ミラーを、managed settings で配布
+- CLI と VS Code: Claude Code が `<設定ディレクトリ>/plugins/synced/` に置いた写し (`<name>@synced`) を
+  読み込みます (claude.ai のアカウントでサインインしたセッション、v2.1.273 以降)
+- Claude Desktop: Desktop が組織のプラグインをダウンロードし、Claude Code に渡します
 
-組織同期のプラグインも、Claude Code に `<name>@synced` として届きます (claude.ai のアカウントで
-サインインしたターミナルのセッション、v2.1.273 以降)。ただし、Desktop の Code タブと VS Code
-への配布はドキュメントに書かれておらず、OAuth トークンや API キーで認証するセッションには届きません。
-利用者が `syncClaudeAiPlugins: false` を設定すると止まります。そのため managed settings の経路を残しています。
-両方から届いたときは managed settings 側だけが読み込まれ、二重には収集しません。
+この public ミラーは、組織同期が届かない環境のためにあります。OAuth トークンや API キーで認証する
+セッション (CI など) には組織同期が届かないので、上のインストールの手順でこのミラーから入れます。
+以前は Team settings (managed settings) の `extraKnownMarketplaces` / `enabledPlugins` でも全員に
+配っていました。今は managed settings では有効にしていません。有効にすると、同じ名前の組織同期の版より
+優先されるためです。同じ名前のプラグインがいくつかの経路から届いても、Claude Code は 1 つだけを読み込み、
+二重には収集しません。
 
 ### 参照
 
