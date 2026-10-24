@@ -46,7 +46,7 @@ import {
   UNMARKED_BUCKET,
 } from './lib/delivery'
 import { commandEvent, mayHoldDetection, type Row, skillEvents } from './lib/detect'
-import { extractOriginUrl, sanitizeRemoteUrl } from './lib/git'
+import { branchFromHead, extractOriginUrl, sanitizeRemoteUrl } from './lib/git'
 import { classify, headerValuesAreSafe, joinUrl, type PostResult, parseRetryAfter } from './lib/http'
 import { emailFromClaudeJson } from './lib/identity'
 import {
@@ -351,6 +351,24 @@ async function remoteOriginUrl($: Dollar, cwd: string): Promise<{ url?: string; 
   const url = await runQuiet($, ['git', '-C', cwd, 'config', '--get', 'remote.origin.url'])
   const sanitized = url === undefined ? undefined : sanitizeRemoteUrl(url)
   return sanitized ? { url: sanitized, source: 'git' } : { source: 'none' }
+}
+
+/** 開始時のブランチ。worktree / submodule は解決先の HEAD を読み、通常の detached HEAD は省略する。 */
+async function gitBranch($: Dollar, cwd: string): Promise<string | undefined> {
+  if (!cwd) return undefined
+  const gitDir = await resolveGitDir($, cwd)
+  if (gitDir) {
+    const head = await readText($, joinPath(gitDir, 'HEAD'))
+    if (head !== undefined) {
+      const branch = branchFromHead(head)
+      if (branch) return branch
+      if (/^[0-9a-f]{40}(?:[0-9a-f]{24})?\r?\n?$/i.test(head)) return undefined
+    }
+  }
+  // HEAD を直読できない形式 (reftable の .invalid など) は Git に解決させる。
+  // --short は ref 名が曖昧だと heads/ を残すので使わず、refs/heads/ を自分で外す。
+  const ref = await runQuiet($, ['git', '-C', cwd, 'symbolic-ref', '--quiet', 'HEAD'])
+  return ref === undefined ? undefined : branchFromHead(`ref: ${ref}`)
 }
 
 // ---- 送信元の識別情報 ----
@@ -662,9 +680,12 @@ async function noteSession($: Dollar, sessionId: string, cwd: string, source: st
   // セッションは session.started を別の時刻で作り直さない (raw に余計な行が増えるだけなので)
   if ((await $.store.get(ORIGIN_PREFIX + sessionId)) !== undefined) return info
   const now = await $.clock.now()
+  // 本人の識別・送信は後になることがある。ブランチはここで確定し、outbox に本文ごと保存する。
+  const branch = await gitBranch($, cwd)
   const snapshot = await outboxSnapshot($, now)
   const payload: JsonObject = {
     source,
+    ...(branch === undefined ? {} : { git_branch: branch }),
     model: await $.session.model(),
     transcript_path: info.transcriptPath,
     claude_code_version: (await $.session.version()).version,

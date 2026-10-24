@@ -6,6 +6,19 @@
 /** API 側の Zod schema と揃えた上限。 */
 const REMOTE_URL_MAX_LENGTH = 512
 
+/** HEAD のローカルブランチ名。detached HEAD・reftable のダミー・不正な ref は返さない。 */
+export function branchFromHead(head: string): string | undefined {
+  const match = /^ref: refs\/heads\/([^\r\n]+)\r?\n?$/.exec(head)
+  const branch = match?.[1]
+  // 異常に長い値は切り詰めず省略する (別のブランチと同じ値にしない)。
+  if (!branch || branch.length > 1024) return undefined
+  if (/[\s~^:?*[\\]/.test(branch)) return undefined
+  if ([...branch].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) return undefined
+  if (branch.includes('..') || branch.includes('@{') || branch.endsWith('.')) return undefined
+  if (branch.split('/').some((part) => !part || part.startsWith('.') || part.endsWith('.lock'))) return undefined
+  return branch
+}
+
 /** git-config のテキストから `[remote "origin"]` の url を取り出す。 */
 export function extractOriginUrl(config: string): string | undefined {
   let inOrigin = false
