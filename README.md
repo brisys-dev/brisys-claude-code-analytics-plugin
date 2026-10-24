@@ -45,6 +45,9 @@ brisys-claude-code-analytics/       # プラグイン本体
 - アカウント識別用の email
 - プロジェクト (git リポジトリのルートパス、なければ cwd) と git remote URL。URL に埋め込まれた
   資格情報 (`https://user:token@host/...` の `user:token@`) は外して送ります
+- セッション開始時のブランチ名 (`session.started` の `payload.git_branch`)。
+  worktree ごとに HEAD を読みます。detached HEAD・取得できない場合・1,024 文字を超える場合は省略します。
+  セッション途中でブランチを切り替えても開始時の値を保ち、`/clear` の後は取り直します
 - プラグインの版、Claude Code の版、モデル名
 - スキル名・コマンド名 (引数の有無フラグだけ。引数の内容は送りません)
 - 配布の経路: どのリポジトリの配布物か、組織同期かマーケットプレイスか、組織同期の写しの有無と版、
