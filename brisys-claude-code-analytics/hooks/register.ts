@@ -112,6 +112,7 @@ let hostCache: { hostname: string; platform: string } | undefined
 let versionCache: string | undefined
 let repositoryCache: string | null | undefined
 let entrypointCache: string | null | undefined
+let loginRecordCache: { sessionId: string; path: string; text: string; size: number; mtimeMs: number } | undefined
 // 直近の session.start の入力。/clear の後のセッションも同じ画面・同じ起動のしかたなので引き継ぐ
 let lastSurface: string | null = null
 let lastInteractive: boolean | null = null
@@ -243,6 +244,45 @@ async function claudeConfigDir($: Dollar): Promise<{ dir: string; explicit: bool
 async function loginRecordPath($: Dollar): Promise<string | undefined> {
   const base = firstNonEmpty(await $.env.get('CLAUDE_CONFIG_DIR')) ?? (await homeDir($))
   return base === undefined ? undefined : joinPath(base, '.claude.json')
+}
+
+/**
+ * メール取得と配布診断で、同じセッション・パス・更新時刻・サイズの正常なログイン記録を共有する。
+ * 読めない・壊れている・メールが無い記録は保存せず、次の送信時に読み直す。
+ */
+async function readLoginRecord($: Dollar): Promise<{ path: string; text: string | undefined } | undefined> {
+  const path = await loginRecordPath($)
+  if (path === undefined) return undefined
+  const sessionId = currentSessionId
+  let stamp: { size: number; mtimeMs: number } | undefined
+  try {
+    const stat = await $.fs.stat(path)
+    if (stat.kind === 'file' && Number.isFinite(stat.size) && Number.isFinite(stat.mtimeMs)) {
+      stamp = { size: stat.size, mtimeMs: stat.mtimeMs }
+    }
+  } catch {}
+  if (
+    sessionId !== undefined &&
+    loginRecordCache?.sessionId === sessionId &&
+    loginRecordCache.path === path &&
+    stamp !== undefined &&
+    loginRecordCache.size === stamp.size &&
+    loginRecordCache.mtimeMs === stamp.mtimeMs
+  ) {
+    return { path, text: loginRecordCache.text }
+  }
+  loginRecordCache = undefined
+  const text = await readText($, path)
+  if (
+    sessionId !== undefined &&
+    sessionId === currentSessionId &&
+    stamp !== undefined &&
+    text !== undefined &&
+    emailFromClaudeJson(text)
+  ) {
+    loginRecordCache = { sessionId, path, text, ...stamp }
+  }
+  return { path, text }
 }
 
 // ---- ファイルとプロセス (失敗はすべて undefined にして呼び出し元で後退させる) ----
@@ -392,9 +432,8 @@ async function resolveEmail(
 ): Promise<{ email: string; source: EmailSource } | undefined> {
   if (cfg.emailOverride) return { email: cfg.emailOverride, source: 'override' }
   if (telemetryEmail) return { email: telemetryEmail, source: 'telemetry' }
-  const path = await loginRecordPath($)
-  if (!path) return undefined
-  const text = await readText($, path)
+  const record = await readLoginRecord($)
+  const text = record?.text
   const email = text === undefined ? undefined : emailFromClaudeJson(text)
   return email ? { email, source: 'login-record' } : undefined
 }
@@ -554,9 +593,9 @@ async function probeSessionSyncedCopy(
  * ログイン記録があるのに読めなければ undefined (候補を決められない)。
  */
 async function sessionBucketCandidates($: Dollar): Promise<string[] | undefined> {
-  const path = await loginRecordPath($)
-  if (path === undefined) return undefined
-  const text = await readText($, path)
+  const record = await readLoginRecord($)
+  if (record === undefined) return undefined
+  const { path, text } = record
   let login: LoginAccount | undefined
   if (text !== undefined) login = loginAccountFromClaudeJson(text)
   // ログイン記録が無いのは、ログインしていないということ (読めないのとは違う)
@@ -633,6 +672,7 @@ async function onSessionStart(
   surface: string | null,
   interactive: boolean | null,
 ): Promise<void> {
+  loginRecordCache = undefined
   lastSurface = surface
   lastInteractive = interactive
   if (!(await loadConfig($))) return
@@ -651,6 +691,7 @@ async function onMainTurnStart($: Dollar): Promise<void> {
   if (!(await loadConfig($))) return
   const sessionId = await $.session.id()
   if (sessionId === currentSessionId && sessions.has(sessionId)) return
+  loginRecordCache = undefined
   currentSessionId = sessionId
   await noteSession($, sessionId, lastCwd ?? (await $.session.cwd()), nextSource())
   startTimer($)
@@ -795,7 +836,10 @@ async function onSessionEnd($: Dollar, sessionId: string, reason: string): Promi
     }
   }
   lastEndReason = reason
-  if (sessionId === currentSessionId) currentSessionId = undefined
+  if (sessionId === currentSessionId) {
+    currentSessionId = undefined
+    loginRecordCache = undefined
+  }
 }
 
 // ---- 送信 ----
